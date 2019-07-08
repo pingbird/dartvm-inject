@@ -1,0 +1,9 @@
+/.idea/
+/cmake-build-debug/
+/CMakeFiles/
+/CMakeCache.txt
+*.cmake
+/Makefile
+*.cbp
+/dart-inject
+*.so
