@@ -113,37 +113,19 @@ int main(int argc, char **argv) {
         cerr << "Error: Failed to create debugger." << endl;
         return 1;
       }
+      
       lldb::SBError error;
-
-      /*auto target = debugger.CreateTarget(exePath.c_str());
-
-      if (error.Fail()) {
-        cerr << "Error: " << error.GetCString() << endl;
-        return 1;
-      }
-
-      auto attachInfo = lldb::SBAttachInfo(pid);
-      auto process = target.Attach(attachInfo, error);
-
-      if (error.Fail()) {
-        cerr << "Error: " << error.GetCString() << endl;
-        return 1;
-      }
-
-      if (!process.IsValid()) {
-        cerr << "Error: Could not attach to process" << endl;
-        return 1;
-      }*/
 
       auto runCmd = [&](std::string cmdString) {
         lldb::SBCommandReturnObject returnObject;
+        cout << "runCmd" << endl;
         cout << cmdString << endl;
         auto interpreter = debugger.GetCommandInterpreter();
         auto status = interpreter.HandleCommand(cmdString.c_str(), returnObject);
 
         if (returnObject.IsValid()) {
           cout << "Success!" << endl;
-          if (returnObject.HasResult()) {
+          if (returnObject.HasResult() && returnObject.GetOutput()) {
             cout << returnObject.GetOutput() << endl;
           }
         } else {
