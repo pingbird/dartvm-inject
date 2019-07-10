@@ -124,6 +124,7 @@ int main(int argc, char **argv) {
     injector.updateTarget();
 
     injector.runCmd("expr (void*)dlopen(\"" + antmanLibPath + "\", 0x2)");
+    injector.runCmd("expr antmanInit()");
 
     if (pargs[0] == "spawn") {
       if (pargs.size() != 2) {
