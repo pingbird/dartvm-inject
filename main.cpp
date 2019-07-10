@@ -1,3 +1,4 @@
+#include <utility>
 #include <iostream>
 
 #include "lldb/API/LLDB.h"
@@ -13,54 +14,60 @@ using std::endl;
 using std::string;
 using std::to_string;
 
-static void getPidOf(int& pid, int queryId, const string& queryName, std::string& exe) {
-  DIR *dp = opendir("/proc");
-  if (dp == nullptr) return;
-  struct dirent *dirp;
-  while (pid < 0 && (dirp = readdir(dp))) {
-    int id = atoi(dirp->d_name); // NOLINT(cert-err34-c)
-    if (id <= 0) continue;
-    if (queryId != -1 && id != queryId) continue;
-    if (pid == -1) {
-      string cmdPath = string("/proc/") + dirp->d_name + "/cmdline";
-      std::ifstream cmdFile(cmdPath.c_str());
-      string cmdLine;
-      getline(cmdFile, cmdLine);
-      if (!cmdLine.empty()) {
-        string searchLine = cmdLine;
-        size_t pos = searchLine.find('\0');
-        if (pos != string::npos)
-          searchLine = searchLine.substr(0, pos);
-        pos = searchLine.rfind('/');
-        if (pos != string::npos)
-          searchLine = searchLine.substr(pos + 1);
-        if (queryName == searchLine)
-          pid = id;
+static bool verbose = false;
+
+struct InjectionError : std::exception {
+  explicit InjectionError(string what) : what(std::move(what)) {}
+  string what;
+};
+
+struct antmanInjector {
+  antmanInjector() :
+    debugger(lldb::SBDebugger::Create(false)),
+    interpreter(debugger.GetCommandInterpreter()) {}
+
+  string runCmd(const string& cmd) {
+    if (verbose) cout << "Running command: " << cmd << endl;
+
+    lldb::SBCommandReturnObject returnObject;
+    auto status = interpreter.HandleCommand(cmd.c_str(), returnObject);
+
+    if (returnObject.HasResult()) {
+      if (returnObject.GetOutput()) {
+        if (verbose) cout << "Result: " << returnObject.GetOutput() << endl;
+        return returnObject.GetOutput();
+      } else if (verbose) {
+        cout << "Command finished sucessfully" << endl;
       }
+    } else if (returnObject.GetError()) {
+      throw InjectionError(returnObject.GetError());
     }
 
-    if (pid != -1) {
-      string exePath = string("/proc/") + dirp->d_name + "/exe";
-      char* exePathStr = realpath(exePath.c_str(), nullptr);
-      exe = string(exePathStr);
-      free(exePathStr);
-      break;
-    }
+    return "";
   }
 
-  closedir(dp);
-}
+  void updateTarget() {
+    target = debugger.GetSelectedTarget();
+    process = target.GetProcess();
+  }
+
+  lldb::SBDebugger debugger;
+  lldb::SBCommandInterpreter interpreter;
+  lldb::SBTarget target;
+  lldb::SBProcess process;
+};
 
 int main(int argc, char **argv) {
   cxxopts::Options options("dart-inject", "Injects code into a running DartVM process");
 
   options.add_options()
     ("h,help", "Print help")
-    ("l,thanos", "Thanos shared object location")
-    ("p,pid", "Dart process id", cxxopts::value<int>(), "N");
+    ("p,pid", "Dart process id", cxxopts::value<int>(), "N")
+    ("v,verbose", "Enable debug prints")
+    ("l,antman", "Override antman location");
 
   options.add_options("_")
-    ("positional", "", cxxopts::value<std::vector<std::string>>());
+    ("positional", "", cxxopts::value<std::vector<string>>());
 
   options.parse_positional({"positional"});
 
@@ -79,26 +86,44 @@ int main(int argc, char **argv) {
     }
 
     int pid = -1;
-    int queryId = -1;
-    if (arg.count("pid")) queryId = arg["pid"].as<int>();
-    string exePath;
-    getPidOf(pid, queryId, "dart", exePath);
+    if (arg.count("pid")) pid = arg["pid"].as<int>();
+    if (arg.count("v")) verbose = true;
 
-    string thanosLibPath;
-    if (arg.count("thanos")) {
-      thanosLibPath = arg["thanos"].as<string>();
-    } else {
-      char* cwd = getcwd(nullptr, PATH_MAX);
-      thanosLibPath = cwd + string("/libthanos.so");
-      free(cwd);
+    if (verbose) cout << "Debug prints enabled" << endl;
+
+    std::string cwd;
+    {
+      char* ccwd = getcwd(nullptr, PATH_MAX);
+      cwd = string(ccwd);
+      free(ccwd);
     }
+
+    if (verbose) cout << "Current directory is '" + cwd + "'" << endl;
+
+    string antmanLibPath;
+    if (arg.count("antman")) {
+      antmanLibPath = arg["antman"].as<string>();
+    } else {
+      antmanLibPath = "libantman.so";
+    }
+
+    if (antmanLibPath[0] != '/') {
+      antmanLibPath = cwd + "/" + antmanLibPath;
+    }
+
+    auto &pargs = arg["positional"].as<std::vector<string>>();
+
+    lldb::SBDebugger::Initialize();
+    antmanInjector injector;
 
     if (pid == -1) {
-      cerr << "Error: Could not find dart process.";
-      return 1;
+      injector.runCmd("process attach -n dart");
+    } else {
+      injector.runCmd("process attach -p " + to_string(pid));
     }
+    injector.updateTarget();
 
-    auto &pargs = arg["positional"].as<std::vector<std::string>>();
+    injector.runCmd("expr (void*)dlopen(\"" + antmanLibPath + "\", 0x2)");
 
     if (pargs[0] == "spawn") {
       if (pargs.size() != 2) {
@@ -113,37 +138,26 @@ int main(int argc, char **argv) {
         cerr << "Error: Failed to create debugger." << endl;
         return 1;
       }
-      
-      lldb::SBError error;
 
-      auto runCmd = [&](std::string cmdString) {
-        lldb::SBCommandReturnObject returnObject;
-        cout << "runCmd" << endl;
-        cout << cmdString << endl;
-        auto interpreter = debugger.GetCommandInterpreter();
-        auto status = interpreter.HandleCommand(cmdString.c_str(), returnObject);
+      std::string scriptPath = pargs[1];
+      if (scriptPath[0] != '/') {
+        scriptPath = cwd + "/" + scriptPath;
+      }
 
-        if (returnObject.IsValid()) {
-          cout << "Success!" << endl;
-          if (returnObject.HasResult() && returnObject.GetOutput()) {
-            cout << returnObject.GetOutput() << endl;
-          }
-        } else {
-          cout << "Error :( " << returnObject.GetError() << endl;
-        }
-      };
+      if (access(scriptPath.c_str(), F_OK ) == -1) {
+        throw InjectionError("Script file not found: '" + scriptPath + "'");
+      }
 
-      runCmd("process attach -p " + to_string(pid));
-      runCmd("expr (void*)dlopen(\"" + thanosLibPath + "\", 0x2)");
-      runCmd("expr thanosInit()");
-      runCmd("expr thanosSpawnUri(\"hello.dart\")");
-
-      cout << "Done!" << endl;
+      injector.runCmd("expr antmanSpawn(\"" + scriptPath + "\")");
     } else {
       cerr << "Error: Unknown command '" << pargs[0] << "'." << endl;
       return 1;
     }
   } catch (const cxxopts::OptionException& e) {
     cerr << "Error: " << e.what() << endl;
+    return 1;
+  } catch (const InjectionError& e) {
+    cerr << "Injection error: " << e.what << endl;
+    return 1;
   }
 }
