@@ -1,6 +1,7 @@
 #include <iostream>
 #include <thread>
 #include <cstring>
+#include <sstream>
 
 #define NDEBUG
 #define RELEASE
@@ -12,6 +13,12 @@
 #include "vm/lockers.h"
 #include "vm/port.h"
 #include "vm/snapshot.h"
+#include "vm/dart.h"
+#include "vm/thread_pool.h"
+#include "vm/version.h"
+
+using std::string;
+using std::to_string;
 
 void antmanInit() {
   static bool isInitialized = false;
@@ -46,7 +53,7 @@ void antmanSpawn(const char* uri) {
   strcpy(uriCopy, uri);
 
   dart::OSThread::Start("antmanSpawnUri", [](dart::uword targs) {
-    auto uriCopy = std::string(reinterpret_cast<char*>(targs));
+    auto uriCopy = string(reinterpret_cast<char*>(targs));
     delete reinterpret_cast<char*>(targs);
 
     char* error;
@@ -93,4 +100,45 @@ void antmanSpawn(const char* uri) {
       return;
     }
   }, reinterpret_cast<dart::uword>(uriCopy));
+}
+
+class AntIsolateVisitor : public dart::IsolateVisitor {
+public:
+  explicit AntIsolateVisitor(string* info) : info(info) {}
+  ~AntIsolateVisitor() override = default;
+
+  void VisitIsolate(dart::Isolate* isolate) override {
+    isolate->mutator_thread()->EnterSafepoint();
+
+    *info += "Isolate " + to_string(count) + ": " + string(isolate->name()) + "\n";
+    if (isolate->IsPaused())
+      *info += "  paused\n";
+    else if (isolate->mutator_thread()->IsExecutingDartCode())
+      *info += "  executing\n";
+    else
+      *info += "  running\n";
+
+    isolate->ScheduleInterrupts();
+
+    isolate->mutator_thread()->ExitSafepoint();
+
+    count++;
+  }
+
+private:
+  int count = 0;
+  string* info;
+};
+
+const char* antmanInfo() {
+  string info;
+
+  info += "Version: " + string(dart::Version::String()) + "\n";
+
+  AntIsolateVisitor visitor(&info);
+  dart::JSONStream stream;
+  dart::Service::PrintJSONForVM(&stream, false);
+  dart::Isolate::VisitIsolates(&visitor);
+
+  return strdup(info.c_str());
 }

@@ -21,6 +21,13 @@ struct InjectionError : std::exception {
   string what;
 };
 
+void assertSBErr(lldb::SBError& err) {
+  if (err.Fail()) {
+    cerr << "Error: " << err.GetCString() << endl;
+    exit(1);
+  }
+}
+
 struct antmanInjector {
   antmanInjector() :
     debugger(lldb::SBDebugger::Create(false)),
@@ -44,6 +51,43 @@ struct antmanInjector {
     }
 
     return "";
+  }
+
+  lldb::SBValue expr(const char* cmd) {
+    if (verbose) cout << "Evaluating expr: " << cmd << endl;
+    auto val = target.EvaluateExpression(cmd);
+    if (!val.IsValid()) {
+      cerr << "Error: Expression not valid: " << val.GetError().GetCString() << endl;
+      exit(1);
+    }
+    return val;
+  }
+
+  size_t sizeExpr(const char* cmd) {
+    lldb::SBError err;
+    auto o = expr(cmd).GetData().GetAddress(err, 0);
+    assertSBErr(err);
+    return o;
+  }
+
+  int int32Expr(const char* cmd) {
+    lldb::SBError err;
+    auto o = expr(cmd).GetData().GetSignedInt32(err, 0);
+    assertSBErr(err);
+    return o;
+  }
+
+  std::string strExpr(const char* cmd) {
+    auto str = sizeExpr(cmd);
+    auto strPtr = string(to_string(str));
+    auto len = sizeExpr(("(size_t)strlen(" + strPtr + ")").c_str());
+    auto o = std::string();
+    o.resize(len);
+    lldb::SBError err;
+    process.ReadCStringFromMemory(str, (void*)&o[0], len, err);
+    assertSBErr(err);
+    expr(("free(" + strPtr + ")").c_str());
+    return o;
   }
 
   void updateTarget() {
@@ -126,17 +170,17 @@ int main(int argc, char **argv) {
     injector.runCmd("expr (void*)dlopen(\"" + antmanLibPath + "\", 0x2)");
     injector.runCmd("expr antmanInit()");
 
+    auto debugger = lldb::SBDebugger::Create(false);
+
+    if (!debugger.IsValid()) {
+      cerr << "Error: Failed to create debugger." << endl;
+      return 1;
+    }
+
+    // SPAWN //
     if (pargs[0] == "spawn") {
       if (pargs.size() != 2) {
         cerr << "Error: Wrong number of arguments." << endl;
-        return 1;
-      }
-
-      lldb::SBDebugger::Initialize();
-      auto debugger = lldb::SBDebugger::Create(false);
-
-      if (!debugger.IsValid()) {
-        cerr << "Error: Failed to create debugger." << endl;
         return 1;
       }
 
@@ -145,11 +189,21 @@ int main(int argc, char **argv) {
         scriptPath = cwd + "/" + scriptPath;
       }
 
-      if (access(scriptPath.c_str(), F_OK ) == -1) {
+      if (access(scriptPath.c_str(), F_OK) == -1) {
         throw InjectionError("Script file not found: '" + scriptPath + "'");
       }
 
       injector.runCmd("expr antmanSpawn(\"" + scriptPath + "\")");
+
+    // INFO //
+    } else if (pargs[0] == "info") {
+      if (pargs.size() != 1) {
+        cerr << "Error: Wrong number of arguments." << endl;
+        return 1;
+      }
+
+      auto infoStr = injector.strExpr("(intptr_t)antmanInfo()");
+      cout << infoStr << endl;
     } else {
       cerr << "Error: Unknown command '" << pargs[0] << "'." << endl;
       return 1;
